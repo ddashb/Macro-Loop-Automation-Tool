@@ -1,0 +1,624 @@
+# =============================================================================
+# Macro Loop Automation Tool v1.0 by David Tan
+# =============================================================================
+# Setup:
+#   pip install pyautogui pillow pytesseract ttkbootstrap
+#
+# Tesseract OCR (free, required for OCR step):
+#   Download from: https://github.com/UB-Mannheim/tesseract/wiki
+#   Install, then if it's not found automatically, uncomment the line below
+#   and set the path to where you installed it:
+#
+# import pytesseract
+# pytesseract.pytesseract.tesseract_cmd = r"C:\Users\david\AppData\Local\Programs\Tesseract-OCR"
+#
+# Run:
+#   python app.py
+# =============================================================================
+
+import csv
+import json
+import os
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+import pyautogui
+import pytesseract
+import ttkbootstrap as tb
+from ttkbootstrap.constants import DANGER, PRIMARY, SECONDARY, SUCCESS
+from PIL import Image, ImageTk
+
+# Fix blurry GUI and wrong mouse coordinates on high-DPI Windows displays
+try:
+    import ctypes
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    pass
+
+# Uncomment if Tesseract is not in your PATH:
+pytesseract.pytesseract.tesseract_cmd = r"C:\Users\david\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+
+# Darkly theme palette (used to manually style tk.Listbox)
+_DARK_BG   = "#2b3035"
+_DARK_FG   = "#adb5bd"
+_SELECT_BG = "#375a7f"
+
+
+class MacroApp:
+    def __init__(self, root: tb.Window):
+        self.root = root
+        self.root.title("Macro Loop Automation Tool")
+        self.root.minsize(700, 480)
+
+        # --- App state ---
+        self.actions: list[dict] = []
+        self.stop_flag = threading.Event()
+        self.screenshot_counter = 0
+        self._run_thread: threading.Thread | None = None
+
+        # --- Input StringVars ---
+        self.loop_count_var = tk.StringVar(value="1")
+        self.action_type_var = tk.StringVar(value="Left Click")
+        self.click_x = tk.StringVar()
+        self.click_y = tk.StringVar()
+        self.wait_seconds = tk.StringVar(value="1.0")
+        self.ss_x1 = tk.StringVar()
+        self.ss_y1 = tk.StringVar()
+        self.ss_x2 = tk.StringVar()
+        self.ss_y2 = tk.StringVar()
+
+        self._build_ui()
+
+    # =========================================================================
+    # UI Construction
+    # =========================================================================
+
+    def _build_ui(self):
+        # Toolbar
+        toolbar = ttk.Frame(self.root, padding=(6, 4))
+        toolbar.pack(side=tk.TOP, fill=tk.X)
+        self._build_toolbar(toolbar)
+
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X)
+
+        # Middle area
+        middle = ttk.Frame(self.root, padding=8)
+        middle.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        builder_frame = ttk.LabelFrame(middle, text="Action Builder", padding=8)
+        builder_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+        self._build_action_builder(builder_frame)
+
+        list_frame = ttk.LabelFrame(middle, text="Actions", padding=8)
+        list_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._build_action_list(list_frame)
+
+        # Status bar
+        ttk.Separator(self.root, orient=tk.HORIZONTAL).pack(fill=tk.X)
+        self.status_var = tk.StringVar(value="Ready.")
+        status_bar = ttk.Label(
+            self.root,
+            textvariable=self.status_var,
+            anchor=tk.W,
+            padding=(8, 4),
+            bootstyle="inverse-secondary",
+        )
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def _build_toolbar(self, parent: ttk.Frame):
+        btn_opts = {"padx": 4, "side": tk.LEFT}
+
+        ttk.Button(parent, text="New Loop", bootstyle=SECONDARY, command=self.new_loop).pack(**btn_opts)
+        ttk.Button(parent, text="Save Loop", bootstyle=SECONDARY, command=self.save_loop).pack(**btn_opts)
+        ttk.Button(parent, text="Load Loop", bootstyle=SECONDARY, command=self.load_loop).pack(**btn_opts)
+
+        ttk.Separator(parent, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=4)
+
+        ttk.Label(parent, text="Loop Count:").pack(side=tk.LEFT)
+        ttk.Entry(parent, textvariable=self.loop_count_var, width=5).pack(
+            side=tk.LEFT, padx=(4, 12)
+        )
+
+        self.run_btn = ttk.Button(
+            parent, text="Run Loop", bootstyle=SUCCESS, command=self.run_loop
+        )
+        self.run_btn.pack(**btn_opts)
+
+        ttk.Button(parent, text="Stop", bootstyle=DANGER, command=self.stop_loop).pack(**btn_opts)
+
+    def _build_action_builder(self, parent: ttk.Frame):
+        # Action type dropdown (Combobox instead of OptionMenu)
+        ttk.Label(parent, text="Action Type:").grid(
+            row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 4)
+        )
+        action_types = ["Left Click", "Mouseover", "Wait", "Screenshot"]
+        combo = ttk.Combobox(
+            parent,
+            textvariable=self.action_type_var,
+            values=action_types,
+            state="readonly",
+            width=14,
+        )
+        combo.bind("<<ComboboxSelected>>", self._on_type_change)
+        combo.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=(0, 8))
+
+        # --- Left Click fields ---
+        self.click_frame = ttk.Frame(parent)
+        ttk.Label(self.click_frame, text="X:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.click_frame, textvariable=self.click_x, width=8).grid(row=0, column=1, pady=3)
+        ttk.Label(self.click_frame, text="Y:").grid(row=1, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.click_frame, textvariable=self.click_y, width=8).grid(row=1, column=1, pady=3)
+
+        # --- Mouseover fields ---
+        self.hover_x = tk.StringVar()
+        self.hover_y = tk.StringVar()
+        self.hover_frame = ttk.Frame(parent)
+        ttk.Label(self.hover_frame, text="X:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.hover_frame, textvariable=self.hover_x, width=8).grid(row=0, column=1, pady=3)
+        ttk.Label(self.hover_frame, text="Y:").grid(row=1, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.hover_frame, textvariable=self.hover_y, width=8).grid(row=1, column=1, pady=3)
+
+        # --- Wait fields ---
+        self.wait_frame = ttk.Frame(parent)
+        ttk.Label(self.wait_frame, text="Seconds:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.wait_frame, textvariable=self.wait_seconds, width=8).grid(row=0, column=1, pady=3)
+
+        # --- Screenshot fields ---
+        self.screenshot_frame = ttk.Frame(parent)
+        for i, (lbl, var) in enumerate(
+            [("X1:", self.ss_x1), ("Y1:", self.ss_y1), ("X2:", self.ss_x2), ("Y2:", self.ss_y2)]
+        ):
+            ttk.Label(self.screenshot_frame, text=lbl).grid(row=i, column=0, sticky=tk.E, padx=(0, 4))
+            ttk.Entry(self.screenshot_frame, textvariable=var, width=8).grid(row=i, column=1, pady=3)
+        ttk.Button(
+            self.screenshot_frame, text="Pick Area", bootstyle=SECONDARY, command=self.pick_area
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
+
+        # Show the default (Left Click) panel
+        self.click_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W)
+        self._current_field_frame = self.click_frame
+
+        # Buttons
+        ttk.Button(parent, text="Get Mouse Pos", bootstyle=SECONDARY, command=self.get_mouse_pos).grid(
+            row=3, column=0, columnspan=2, sticky=tk.EW, pady=(12, 3)
+        )
+        ttk.Button(parent, text="Preview Pos", bootstyle=SECONDARY, command=self.preview_pos).grid(
+            row=4, column=0, columnspan=2, sticky=tk.EW, pady=3
+        )
+        ttk.Button(
+            parent, text="Add Action", bootstyle=PRIMARY, command=self.add_action
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(10, 3))
+
+    def _build_action_list(self, parent: ttk.Frame):
+        scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL)
+        self.listbox = tk.Listbox(
+            parent,
+            yscrollcommand=scrollbar.set,
+            selectmode=tk.SINGLE,
+            font=("Consolas", 10),
+            activestyle="none",
+            bg=_DARK_BG,
+            fg=_DARK_FG,
+            selectbackground=_SELECT_BG,
+            selectforeground="white",
+            borderwidth=0,
+            highlightthickness=0,
+            relief=tk.FLAT,
+        )
+        scrollbar.config(command=self.listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        ttk.Button(
+            parent, text="Remove Selected", bootstyle=(DANGER, "outline"), command=self.remove_selected
+        ).pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+
+    # =========================================================================
+    # Dynamic field switching
+    # =========================================================================
+
+    def _on_type_change(self, _=None):
+        self._current_field_frame.grid_forget()
+        action_type = self.action_type_var.get()
+        frame_map = {
+            "Left Click": self.click_frame,
+            "Mouseover": self.hover_frame,
+            "Wait": self.wait_frame,
+            "Screenshot": self.screenshot_frame,
+        }
+        self._current_field_frame = frame_map[action_type]
+        self._current_field_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W)
+
+    # =========================================================================
+    # Toolbar / action callbacks
+    # =========================================================================
+
+    def new_loop(self):
+        self.actions.clear()
+        self._refresh_listbox()
+        self._set_status("Loop cleared.")
+
+    def add_action(self):
+        action_type = self.action_type_var.get()
+        try:
+            if action_type == "Left Click":
+                x = self._validate_int(self.click_x.get(), "X")
+                y = self._validate_int(self.click_y.get(), "Y")
+                action = {"type": "click", "x": x, "y": y}
+
+            elif action_type == "Mouseover":
+                x = self._validate_int(self.hover_x.get(), "X")
+                y = self._validate_int(self.hover_y.get(), "Y")
+                action = {"type": "mouseover", "x": x, "y": y}
+
+            elif action_type == "Wait":
+                s = self._validate_float(self.wait_seconds.get(), "Seconds")
+                if s <= 0:
+                    raise ValueError("Seconds must be greater than 0.")
+                action = {"type": "wait", "seconds": s}
+
+            elif action_type == "Screenshot":
+                x1 = self._validate_int(self.ss_x1.get(), "X1")
+                y1 = self._validate_int(self.ss_y1.get(), "Y1")
+                x2 = self._validate_int(self.ss_x2.get(), "X2")
+                y2 = self._validate_int(self.ss_y2.get(), "Y2")
+                if x2 <= x1:
+                    raise ValueError("X2 must be greater than X1.")
+                if y2 <= y1:
+                    raise ValueError("Y2 must be greater than Y1.")
+                action = {"type": "screenshot", "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+            else:
+                return
+
+        except ValueError as e:
+            self._set_status(f"Error: {e}")
+            return
+
+        self.actions.append(action)
+        self._refresh_listbox()
+        self._set_status(f"Added: {self._action_label(action)}")
+
+    def remove_selected(self):
+        sel = self.listbox.curselection()
+        if not sel:
+            self._set_status("No action selected.")
+            return
+        idx = sel[0]
+        removed = self.actions.pop(idx)
+        self._refresh_listbox()
+        self._set_status(f"Removed: {self._action_label(removed)}")
+
+    def save_loop(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Save Loop",
+        )
+        if not path:
+            return
+        try:
+            loop_count = int(self.loop_count_var.get())
+        except ValueError:
+            loop_count = 1
+        data = {"actions": self.actions, "loop_count": loop_count}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        self._set_status(f"Saved to {os.path.basename(path)}")
+
+    def load_loop(self):
+        path = filedialog.askopenfilename(
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            title="Load Loop",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.actions = data.get("actions", [])
+            self.loop_count_var.set(str(data.get("loop_count", 1)))
+            self._refresh_listbox()
+            self._set_status(f"Loaded {len(self.actions)} action(s) from {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Could not load file:\n{e}")
+
+    def run_loop(self):
+        if not self.actions:
+            self._set_status("Error: No actions to run. Add actions first.")
+            return
+        try:
+            loop_count = int(self.loop_count_var.get())
+            if loop_count < 1:
+                raise ValueError
+        except ValueError:
+            self._set_status("Error: Loop Count must be a positive integer.")
+            return
+
+        self.screenshot_counter = 0
+        self.stop_flag.clear()
+        self.run_btn.config(state=tk.DISABLED)
+        self._run_thread = threading.Thread(
+            target=self._run_worker, args=(loop_count,), daemon=True
+        )
+        self._run_thread.start()
+
+    def stop_loop(self):
+        self.stop_flag.set()
+        self._set_status("Stopping...")
+
+    # =========================================================================
+    # Mouse position helpers
+    # =========================================================================
+
+    def get_mouse_pos(self):
+        """Countdown 3s then capture mouse position into X/Y fields."""
+        threading.Thread(target=self._countdown_and_capture, daemon=True).start()
+
+    def _countdown_and_capture(self):
+        for i in [3, 2, 1]:
+            self.root.after(0, lambda i=i: self._set_status(f"Hover mouse over target... capturing in {i}s"))
+            time.sleep(1)
+        pos = pyautogui.position()
+        action_type = self.action_type_var.get()
+        if action_type == "Mouseover":
+            x_var, y_var = self.hover_x, self.hover_y
+        else:
+            x_var, y_var = self.click_x, self.click_y
+        self.root.after(0, lambda: x_var.set(str(pos.x)))
+        self.root.after(0, lambda: y_var.set(str(pos.y)))
+        self.root.after(0, lambda: self._set_status(f"Captured position: ({pos.x}, {pos.y})"))
+
+    def preview_pos(self):
+        """Move mouse to the X/Y coords currently in the active action fields."""
+        action_type = self.action_type_var.get()
+        if action_type == "Mouseover":
+            x_var, y_var = self.hover_x, self.hover_y
+        else:
+            x_var, y_var = self.click_x, self.click_y
+        try:
+            x = self._validate_int(x_var.get(), "X")
+            y = self._validate_int(y_var.get(), "Y")
+        except ValueError as e:
+            self._set_status(f"Error: {e}")
+            return
+        pyautogui.moveTo(x, y)
+        self._set_status(f"Mouse moved to ({x}, {y})")
+
+    def pick_area(self):
+        """Hide the app, freeze the screen, let the user drag-select a region."""
+        self.root.withdraw()
+        time.sleep(0.2)  # Wait for main window to disappear before screenshot
+
+        screen_img = pyautogui.screenshot()
+        screen_w, screen_h = screen_img.size
+
+        overlay = tk.Toplevel()
+        overlay.attributes('-fullscreen', True)
+        overlay.attributes('-topmost', True)
+        overlay.lift()
+        overlay.focus_force()
+
+        tk_img = ImageTk.PhotoImage(screen_img)
+
+        canvas = tk.Canvas(overlay, cursor='cross', highlightthickness=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
+        canvas.create_image(0, 0, anchor=tk.NW, image=tk_img)
+        canvas.image = tk_img  # Prevent garbage collection
+
+        # Semi-transparent instruction banner
+        canvas.create_rectangle(
+            screen_w // 2 - 280, 8, screen_w // 2 + 280, 52,
+            fill='black', stipple='gray50', outline='',
+        )
+        canvas.create_text(
+            screen_w // 2, 30,
+            text="Click and drag to select area   |   Escape to cancel",
+            fill='yellow', font=('Arial', 14, 'bold'),
+        )
+
+        state = {'start_x': 0, 'start_y': 0, 'rect': None}
+
+        def on_press(event):
+            state['start_x'] = event.x
+            state['start_y'] = event.y
+            if state['rect']:
+                canvas.delete(state['rect'])
+            state['rect'] = canvas.create_rectangle(
+                event.x, event.y, event.x, event.y,
+                outline='red', width=2, dash=(4, 2),
+            )
+
+        def on_drag(event):
+            if state['rect']:
+                canvas.coords(state['rect'], state['start_x'], state['start_y'], event.x, event.y)
+
+        def on_release(event):
+            x1 = min(state['start_x'], event.x)
+            y1 = min(state['start_y'], event.y)
+            x2 = max(state['start_x'], event.x)
+            y2 = max(state['start_y'], event.y)
+            overlay.destroy()
+            self.root.deiconify()
+            self.root.lift()
+            if x2 - x1 > 5 and y2 - y1 > 5:
+                self.ss_x1.set(str(x1))
+                self.ss_y1.set(str(y1))
+                self.ss_x2.set(str(x2))
+                self.ss_y2.set(str(y2))
+                self._set_status(f"Area selected: ({x1},{y1}) → ({x2},{y2})")
+            else:
+                self._set_status("Selection too small — try again.")
+
+        def on_cancel(event):
+            overlay.destroy()
+            self.root.deiconify()
+            self.root.lift()
+            self._set_status("Area selection cancelled.")
+
+        canvas.bind('<ButtonPress-1>', on_press)
+        canvas.bind('<B1-Motion>', on_drag)
+        canvas.bind('<ButtonRelease-1>', on_release)
+        overlay.bind('<Escape>', on_cancel)
+
+    # =========================================================================
+    # Run worker (background thread)
+    # =========================================================================
+
+    def _run_worker(self, loop_count: int):
+        os.makedirs("./screenshots", exist_ok=True)
+        try:
+            for i in range(loop_count):
+                if self.stop_flag.is_set():
+                    break
+                self.root.after(0, lambda i=i: self._set_status(f"Running loop {i + 1} of {loop_count}..."))
+                for action in self.actions:
+                    if self.stop_flag.is_set():
+                        break
+                    self._execute_action(action)
+
+        except pyautogui.FailSafeException:
+            self.root.after(0, lambda: self._set_status(
+                "Stopped: mouse hit top-left corner (failsafe triggered)."
+            ))
+            self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
+            return
+        except Exception as e:
+            self.root.after(0, lambda e=e: self._set_status(f"Error during run: {e}"))
+            self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
+            return
+
+        if self.stop_flag.is_set():
+            self.root.after(0, lambda: self._set_status("Loop stopped by user."))
+            self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
+            return
+
+        # Auto-run OCR after all loops finish
+        self.root.after(0, lambda: self._set_status("Loops done. Running OCR on screenshots..."))
+        self._run_ocr_on_screenshots()
+        self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
+
+    def _execute_action(self, action: dict):
+        t = action["type"]
+        if t == "click":
+            pyautogui.click(action["x"], action["y"])
+        elif t == "mouseover":
+            pyautogui.moveTo(action["x"], action["y"])
+        elif t == "wait":
+            # Sleep in small increments so stop_flag is checked more often
+            end = time.time() + action["seconds"]
+            while time.time() < end:
+                if self.stop_flag.is_set():
+                    return
+                time.sleep(0.05)
+        elif t == "screenshot":
+            x1, y1, x2, y2 = action["x1"], action["y1"], action["x2"], action["y2"]
+            w = x2 - x1
+            h = y2 - y1
+            self.screenshot_counter += 1
+            path = f"./screenshots/{self.screenshot_counter}.png"
+            img = pyautogui.screenshot(region=(x1, y1, w, h))
+            img.save(path)
+
+    # =========================================================================
+    # OCR + CSV
+    # =========================================================================
+
+    def _run_ocr_on_screenshots(self):
+        folder = "./screenshots"
+        try:
+            pngs = sorted(
+                [f for f in os.listdir(folder) if f.endswith(".png")],
+                key=lambda f: int(os.path.splitext(f)[0]),
+            )
+        except Exception as e:
+            self.root.after(0, lambda e=e: self._set_status(f"OCR error listing files: {e}"))
+            return
+
+        if not pngs:
+            self.root.after(0, lambda: self._set_status("No screenshots found for OCR."))
+            return
+
+        rows = []
+        try:
+            for fname in pngs:
+                img = Image.open(os.path.join(folder, fname))
+                text = pytesseract.image_to_string(img).strip()
+                rows.append([fname, text])
+        except Exception as e:
+            msg = (
+                f"OCR error: {e}\n\n"
+                "Screenshots were saved, but no results.csv was written.\n"
+                "Make sure Tesseract is installed and in your PATH (or set tesseract_cmd at the top of app.py)."
+            )
+            self.root.after(0, lambda msg=msg: self._set_status(
+                "OCR failed. Screenshots saved. See console for details."
+            ))
+            print(msg)
+            return
+
+        try:
+            with open("results.csv", "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(["image_file", "extracted_text"])
+                writer.writerows(rows)
+            self.root.after(0, lambda: self._set_status(
+                f"Done. {len(rows)} screenshot(s) processed. results.csv written."
+            ))
+        except Exception as e:
+            self.root.after(0, lambda e=e: self._set_status(f"Could not write results.csv: {e}"))
+
+    # =========================================================================
+    # Helpers
+    # =========================================================================
+
+    def _refresh_listbox(self):
+        self.listbox.delete(0, tk.END)
+        for i, action in enumerate(self.actions):
+            self.listbox.insert(tk.END, f"  {i + 1:>2}.  {self._action_label(action)}")
+
+    def _action_label(self, action: dict) -> str:
+        t = action["type"]
+        if t == "click":
+            return f"Left Click at ({action['x']}, {action['y']})"
+        elif t == "mouseover":
+            return f"Mouseover at ({action['x']}, {action['y']})"
+        elif t == "wait":
+            return f"Wait {action['seconds']}s"
+        elif t == "screenshot":
+            return f"Screenshot ({action['x1']},{action['y1']}) → ({action['x2']},{action['y2']})"
+        return str(action)
+
+    def _set_status(self, msg: str):
+        """Thread-safe status bar update."""
+        self.root.after(0, lambda: self.status_var.set(msg))
+
+    def _validate_int(self, value: str, field_name: str) -> int:
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{field_name} is required.")
+        try:
+            return int(value)
+        except ValueError:
+            raise ValueError(f"{field_name} must be a whole number (got '{value}').")
+
+    def _validate_float(self, value: str, field_name: str) -> float:
+        value = value.strip()
+        if not value:
+            raise ValueError(f"{field_name} is required.")
+        try:
+            return float(value)
+        except ValueError:
+            raise ValueError(f"{field_name} must be a number (got '{value}').")
+
+
+# =============================================================================
+# Entry point
+# =============================================================================
+
+if __name__ == "__main__":
+    root = tb.Window(themename="darkly")
+    app = MacroApp(root)
+    root.mainloop()
