@@ -26,7 +26,7 @@ A lightweight Python desktop application for automating repetitive tasks like cl
 
 ```bash
 git clone <repository-url>
-cd qa-test
+cd Macro-Loop-Automation-Tool
 ```
 
 ### 2. Create a Virtual Environment (Recommended)
