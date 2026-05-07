@@ -2,7 +2,7 @@
 # Macro Loop Automation Tool v1.0 by David Tan
 # =============================================================================
 # Setup:
-#   pip install pyautogui pillow pytesseract ttkbootstrap
+#   pip install pyautogui pillow pytesseract ttkbootstrap pydirectinput
 #
 # Tesseract OCR (free, required for OCR step):
 #   Download from: https://github.com/UB-Mannheim/tesseract/wiki
@@ -25,6 +25,10 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import pyautogui
+try:
+    import pydirectinput
+except ImportError:
+    pydirectinput = None
 import pytesseract
 import ttkbootstrap as tb
 from ttkbootstrap.constants import DANGER, PRIMARY, SECONDARY, SUCCESS
@@ -57,8 +61,11 @@ class MacroApp:
         self.stop_flag = threading.Event()
         self.screenshot_counter = 0
         self._run_thread: threading.Thread | None = None
+        self._editing_index: int | None = None
+        self._drag_start_index: int | None = None
 
         # --- Input StringVars ---
+        self.game_mode_var = tk.BooleanVar(value=False)
         self.loop_count_var = tk.StringVar(value="1")
         self.action_type_var = tk.StringVar(value="Left Click")
         self.click_x = tk.StringVar()
@@ -128,6 +135,15 @@ class MacroApp:
 
         ttk.Button(parent, text="Stop", bootstyle=DANGER, command=self.stop_loop).pack(**btn_opts)
 
+        ttk.Separator(parent, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=4)
+
+        game_cb = ttk.Checkbutton(
+            parent, text="Game Mode", variable=self.game_mode_var, bootstyle="warning-round-toggle"
+        )
+        if pydirectinput is None:
+            game_cb.config(state=tk.DISABLED)
+        game_cb.pack(side=tk.LEFT, padx=4)
+
     def _build_action_builder(self, parent: ttk.Frame):
         # Action type dropdown (Combobox instead of OptionMenu)
         ttk.Label(parent, text="Action Type:").grid(
@@ -187,9 +203,11 @@ class MacroApp:
         ttk.Button(parent, text="Preview Pos", bootstyle=SECONDARY, command=self.preview_pos).grid(
             row=4, column=0, columnspan=2, sticky=tk.EW, pady=3
         )
-        ttk.Button(
-            parent, text="Add Action", bootstyle=PRIMARY, command=self.add_action
-        ).grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(10, 3))
+        self.add_btn_text = tk.StringVar(value="Add Action")
+        self.add_btn = ttk.Button(
+            parent, textvariable=self.add_btn_text, bootstyle=PRIMARY, command=self.add_action
+        )
+        self.add_btn.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(10, 3))
 
     def _build_action_list(self, parent: ttk.Frame):
         scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL)
@@ -210,6 +228,11 @@ class MacroApp:
         scrollbar.config(command=self.listbox.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.listbox.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.listbox.bind("<Double-Button-1>", self._load_action_for_edit)
+        self.listbox.bind("<ButtonPress-1>",   self._drag_start)
+        self.listbox.bind("<B1-Motion>",       self._drag_motion)
+        self.listbox.bind("<ButtonRelease-1>", self._drag_release)
 
         ttk.Button(
             parent, text="Remove Selected", bootstyle=(DANGER, "outline"), command=self.remove_selected
@@ -277,9 +300,18 @@ class MacroApp:
             self._set_status(f"Error: {e}")
             return
 
-        self.actions.append(action)
-        self._refresh_listbox()
-        self._set_status(f"Added: {self._action_label(action)}")
+        if self._editing_index is not None:
+            self.actions[self._editing_index] = action
+            idx = self._editing_index
+            self._editing_index = None
+            self.add_btn_text.set("Add Action")
+            self._refresh_listbox()
+            self.listbox.selection_set(idx)
+            self._set_status(f"Updated action {idx + 1}: {self._action_label(action)}")
+        else:
+            self.actions.append(action)
+            self._refresh_listbox()
+            self._set_status(f"Added: {self._action_label(action)}")
 
     def remove_selected(self):
         sel = self.listbox.curselection()
@@ -502,10 +534,17 @@ class MacroApp:
 
     def _execute_action(self, action: dict):
         t = action["type"]
+        game_mode = self.game_mode_var.get() and pydirectinput is not None
         if t == "click":
-            pyautogui.click(action["x"], action["y"])
+            if game_mode:
+                pydirectinput.click(action["x"], action["y"])
+            else:
+                pyautogui.click(action["x"], action["y"])
         elif t == "mouseover":
-            pyautogui.moveTo(action["x"], action["y"])
+            if game_mode:
+                pydirectinput.moveTo(action["x"], action["y"])
+            else:
+                pyautogui.moveTo(action["x"], action["y"])
         elif t == "wait":
             # Sleep in small increments so stop_flag is checked more often
             end = time.time() + action["seconds"]
@@ -569,6 +608,77 @@ class MacroApp:
             ))
         except Exception as e:
             self.root.after(0, lambda e=e: self._set_status(f"Could not write results.csv: {e}"))
+
+    # =========================================================================
+    # Edit & drag-reorder
+    # =========================================================================
+
+    def _load_action_for_edit(self, event=None):
+        sel = self.listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        if not (0 <= idx < len(self.actions)):
+            return
+        if self._editing_index == idx:
+            self._editing_index = None
+            self.add_btn_text.set("Add Action")
+            self._set_status("Edit cancelled.")
+            return
+        action = self.actions[idx]
+        t = action["type"]
+        type_map = {"click": "Left Click", "mouseover": "Mouseover", "wait": "Wait", "screenshot": "Screenshot"}
+        self.action_type_var.set(type_map.get(t, "Left Click"))
+        self._on_type_change()
+        if t == "click":
+            self.click_x.set(str(action["x"]))
+            self.click_y.set(str(action["y"]))
+        elif t == "mouseover":
+            self.hover_x.set(str(action["x"]))
+            self.hover_y.set(str(action["y"]))
+        elif t == "wait":
+            self.wait_seconds.set(str(action["seconds"]))
+        elif t == "screenshot":
+            self.ss_x1.set(str(action["x1"]))
+            self.ss_y1.set(str(action["y1"]))
+            self.ss_x2.set(str(action["x2"]))
+            self.ss_y2.set(str(action["y2"]))
+        self._editing_index = idx
+        self.add_btn_text.set("Update Action")
+        self._set_status(f"Editing action {idx + 1} — double-click again to cancel")
+
+    def _drag_start(self, event):
+        idx = self.listbox.nearest(event.y)
+        self._drag_start_index = idx if 0 <= idx < len(self.actions) else None
+
+    def _drag_motion(self, event):
+        if self._drag_start_index is None:
+            return
+        target = self.listbox.nearest(event.y)
+        self.listbox.selection_clear(0, tk.END)
+        self.listbox.selection_set(target)
+
+    def _drag_release(self, event):
+        if self._drag_start_index is None:
+            return
+        target = self.listbox.nearest(event.y)
+        src = self._drag_start_index
+        self._drag_start_index = None
+        if target == src or not (0 <= target < len(self.actions)):
+            return
+        action = self.actions.pop(src)
+        self.actions.insert(target, action)
+        if self._editing_index == src:
+            self._editing_index = target
+        elif self._editing_index is not None:
+            # adjust editing index if it shifted due to the move
+            if src < self._editing_index <= target:
+                self._editing_index -= 1
+            elif target <= self._editing_index < src:
+                self._editing_index += 1
+        self._refresh_listbox()
+        self.listbox.selection_set(target)
+        self._set_status(f"Moved action {src + 1} → position {target + 1}")
 
     # =========================================================================
     # Helpers
