@@ -2,7 +2,7 @@
 # Macro Loop Automation Tool v1.0 by David Tan
 # =============================================================================
 # Setup:
-#   pip install pyautogui pillow pytesseract ttkbootstrap pydirectinput
+#   pip install -r requirements.txt
 #
 # Tesseract OCR (free, required for OCR step):
 #   Download from: https://github.com/UB-Mannheim/tesseract/wiki
