@@ -45,12 +45,26 @@ except Exception:
 pytesseract.pytesseract.tesseract_cmd = r"C:\Users\david\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
 def _preprocess_for_ocr(img: Image.Image) -> Image.Image:
+    from PIL import ImageFilter
     w, h = img.size
     img = img.resize((w * 3, h * 3), Image.LANCZOS)
     img = img.convert("L")
     img = ImageEnhance.Contrast(img).enhance(2.5)
+    img = img.filter(ImageFilter.MedianFilter(3))  # smooth rendering artifacts before threshold
     img = img.point(lambda p: 255 if p > 140 else 0)
     return img
+
+
+def _clean_ocr_text(text: str) -> str:
+    import re
+    # Fix UTF-8 bytes misread as Latin-1 (e.g. â€˜ → ')
+    try:
+        text = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    # Drop lines that are pure noise (fewer than 3 real letters)
+    lines = [ln for ln in text.splitlines() if len(re.sub(r"[^a-zA-Z]", "", ln)) >= 3]
+    return "\n".join(lines).strip()
 
 
 # Darkly theme palette (used to manually style tk.Listbox)
@@ -594,7 +608,7 @@ class MacroApp:
             for fname in pngs:
                 img = Image.open(os.path.join(folder, fname))
                 img = _preprocess_for_ocr(img)
-                text = pytesseract.image_to_string(img, config="--psm 6").strip()
+                text = _clean_ocr_text(pytesseract.image_to_string(img, config="--psm 6"))
                 rows.append([fname, text])
         except Exception as e:
             msg = (
