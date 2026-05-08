@@ -392,7 +392,7 @@ class MacroApp:
             self._set_status("Error: Loop Count must be a positive integer.")
             return
 
-        self.screenshot_counter = 0
+        self.screenshot_counter = self._get_max_screenshot_number()
         self.stop_flag.clear()
         self.run_btn.config(state=tk.DISABLED)
         self._run_thread = threading.Thread(
@@ -603,9 +603,29 @@ class MacroApp:
             self.root.after(0, lambda: self._set_status("No screenshots found for OCR."))
             return
 
+        # Skip files already recorded in results.csv so resumed runs don't re-process old screenshots
+        csv_path = "results.csv"
+        already_done: set[str] = set()
+        csv_exists = os.path.exists(csv_path)
+        if csv_exists:
+            try:
+                with open(csv_path, "r", encoding="utf-8") as f:
+                    reader = csv.reader(f)
+                    next(reader, None)  # skip header
+                    for row in reader:
+                        if row:
+                            already_done.add(row[0])
+            except Exception:
+                pass
+
+        new_pngs = [f for f in pngs if f not in already_done]
+        if not new_pngs:
+            self.root.after(0, lambda: self._set_status("No new screenshots to process."))
+            return
+
         rows = []
         try:
-            for fname in pngs:
+            for fname in new_pngs:
                 img = Image.open(os.path.join(folder, fname))
                 img = _preprocess_for_ocr(img)
                 text = _clean_ocr_text(pytesseract.image_to_string(img, config="--psm 6"))
@@ -623,12 +643,13 @@ class MacroApp:
             return
 
         try:
-            with open("results.csv", "w", newline="", encoding="utf-8") as f:
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow(["image_file", "extracted_text"])
+                if not csv_exists:
+                    writer.writerow(["image_file", "extracted_text"])
                 writer.writerows(rows)
             self.root.after(0, lambda: self._set_status(
-                f"Done. {len(rows)} screenshot(s) processed. results.csv written."
+                f"Done. {len(rows)} screenshot(s) processed. results.csv updated."
             ))
         except Exception as e:
             self.root.after(0, lambda e=e: self._set_status(f"Could not write results.csv: {e}"))
@@ -728,6 +749,17 @@ class MacroApp:
     def _set_status(self, msg: str):
         """Thread-safe status bar update."""
         self.root.after(0, lambda: self.status_var.set(msg))
+
+    def _get_max_screenshot_number(self) -> int:
+        folder = "./screenshots"
+        if not os.path.isdir(folder):
+            return 0
+        nums = [
+            int(os.path.splitext(f)[0])
+            for f in os.listdir(folder)
+            if f.endswith(".png") and os.path.splitext(f)[0].isdigit()
+        ]
+        return max(nums) if nums else 0
 
     def _validate_int(self, value: str, field_name: str) -> int:
         value = value.strip()
