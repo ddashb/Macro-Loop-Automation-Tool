@@ -1,5 +1,17 @@
-pyautogui==0.9.53
-pillow==10.1.0
-pytesseract==0.3.10
-ttkbootstrap==1.6.1
-pydirectinput==1.0.4
+# Macro Loop Automation Tool Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core automation: mouse control, screenshots, keyboard input
+pyautogui
+
+# Image processing and screenshot capture
+pillow
+
+# OCR text extraction from screenshots
+pytesseract
+
+# Modern, themed tkinter GUI framework
+ttkbootstrap
+
+# Game-compatible DirectInput mouse control (for Game Mode feature)
+pydirectinput
