@@ -32,7 +32,7 @@ except ImportError:
 import pytesseract
 import ttkbootstrap as tb
 from ttkbootstrap.constants import DANGER, PRIMARY, SECONDARY, SUCCESS
-from PIL import Image, ImageTk
+from PIL import Image, ImageEnhance, ImageTk
 
 # Fix blurry GUI and wrong mouse coordinates on high-DPI Windows displays
 try:
@@ -43,6 +43,15 @@ except Exception:
 
 # Uncomment if Tesseract is not in your PATH:
 pytesseract.pytesseract.tesseract_cmd = r"C:\Users\david\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+
+def _preprocess_for_ocr(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    img = img.resize((w * 3, h * 3), Image.LANCZOS)
+    img = img.convert("L")
+    img = ImageEnhance.Contrast(img).enhance(2.5)
+    img = img.point(lambda p: 255 if p > 140 else 0)
+    return img
+
 
 # Darkly theme palette (used to manually style tk.Listbox)
 _DARK_BG   = "#2b3035"
@@ -584,7 +593,8 @@ class MacroApp:
         try:
             for fname in pngs:
                 img = Image.open(os.path.join(folder, fname))
-                text = pytesseract.image_to_string(img).strip()
+                img = _preprocess_for_ocr(img)
+                text = pytesseract.image_to_string(img, config="--psm 6").strip()
                 rows.append([fname, text])
         except Exception as e:
             msg = (
