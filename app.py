@@ -29,6 +29,11 @@ try:
     import pydirectinput
 except ImportError:
     pydirectinput = None
+try:
+    import win32api, win32con
+except ImportError:
+    win32api = None
+    win32con = None
 import pytesseract
 import ttkbootstrap as tb
 from ttkbootstrap.constants import DANGER, PRIMARY, SECONDARY, SUCCESS
@@ -98,6 +103,18 @@ class MacroApp:
         self.ss_y1 = tk.StringVar()
         self.ss_x2 = tk.StringVar()
         self.ss_y2 = tk.StringVar()
+        self.rclick_x = tk.StringVar()
+        self.rclick_y = tk.StringVar()
+        self.key_name = tk.StringVar()
+        self.combo_keys = tk.StringVar()
+        self.scroll_x = tk.StringVar()
+        self.scroll_y = tk.StringVar()
+        self.scroll_amount = tk.StringVar(value="3")
+        self.hold_x = tk.StringVar()
+        self.hold_y = tk.StringVar()
+        self.hold_seconds = tk.StringVar(value="1.0")
+        self.auto_wait_var = tk.BooleanVar(value=True)
+        self._last_wait_seconds = "1.0"
 
         self._build_ui()
 
@@ -172,7 +189,8 @@ class MacroApp:
         ttk.Label(parent, text="Action Type:").grid(
             row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 4)
         )
-        action_types = ["Left Click", "Mouseover", "Wait", "Screenshot"]
+        action_types = ["Left Click", "Right Click", "Click & Hold", "Mouseover",
+                        "Key Press", "Key Combo", "Scroll", "Wait", "Screenshot"]
         combo = ttk.Combobox(
             parent,
             textvariable=self.action_type_var,
@@ -215,6 +233,47 @@ class MacroApp:
             self.screenshot_frame, text="Pick Area", bootstyle=SECONDARY, command=self.pick_area
         ).grid(row=4, column=0, columnspan=2, sticky=tk.EW, pady=(8, 0))
 
+        # --- Right Click fields ---
+        self.rclick_frame = ttk.Frame(parent)
+        ttk.Label(self.rclick_frame, text="X:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.rclick_frame, textvariable=self.rclick_x, width=8).grid(row=0, column=1, pady=3)
+        ttk.Label(self.rclick_frame, text="Y:").grid(row=1, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.rclick_frame, textvariable=self.rclick_y, width=8).grid(row=1, column=1, pady=3)
+
+        # --- Click & Hold fields ---
+        self.hold_frame = ttk.Frame(parent)
+        ttk.Label(self.hold_frame, text="X:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.hold_frame, textvariable=self.hold_x, width=8).grid(row=0, column=1, pady=3)
+        ttk.Label(self.hold_frame, text="Y:").grid(row=1, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.hold_frame, textvariable=self.hold_y, width=8).grid(row=1, column=1, pady=3)
+        ttk.Label(self.hold_frame, text="Hold (s):").grid(row=2, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.hold_frame, textvariable=self.hold_seconds, width=8).grid(row=2, column=1, pady=3)
+
+        # --- Key Press fields ---
+        self.key_frame = ttk.Frame(parent)
+        ttk.Label(self.key_frame, text="Key:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.key_frame, textvariable=self.key_name, width=12).grid(row=0, column=1, pady=3)
+        ttk.Label(self.key_frame, text="e.g. enter, f5, space", foreground="#6c757d").grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+
+        # --- Key Combo fields ---
+        self.combo_frame = ttk.Frame(parent)
+        ttk.Label(self.combo_frame, text="Keys:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.combo_frame, textvariable=self.combo_keys, width=12).grid(row=0, column=1, pady=3)
+        ttk.Label(self.combo_frame, text="e.g. ctrl,c  or  win,r", foreground="#6c757d").grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+
+        # --- Scroll fields ---
+        self.scroll_frame = ttk.Frame(parent)
+        ttk.Label(self.scroll_frame, text="X:").grid(row=0, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.scroll_frame, textvariable=self.scroll_x, width=8).grid(row=0, column=1, pady=3)
+        ttk.Label(self.scroll_frame, text="Y:").grid(row=1, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.scroll_frame, textvariable=self.scroll_y, width=8).grid(row=1, column=1, pady=3)
+        ttk.Label(self.scroll_frame, text="Amount:").grid(row=2, column=0, sticky=tk.E, padx=(0, 4))
+        ttk.Entry(self.scroll_frame, textvariable=self.scroll_amount, width=8).grid(row=2, column=1, pady=3)
+        ttk.Label(self.scroll_frame, text="+up / −down", foreground="#6c757d").grid(
+            row=3, column=0, columnspan=2, sticky=tk.W, pady=(0, 3))
+
         # Show the default (Left Click) panel
         self.click_frame.grid(row=2, column=0, columnspan=2, sticky=tk.W)
         self._current_field_frame = self.click_frame
@@ -231,6 +290,10 @@ class MacroApp:
             parent, textvariable=self.add_btn_text, bootstyle=PRIMARY, command=self.add_action
         )
         self.add_btn.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(10, 3))
+        ttk.Checkbutton(
+            parent, text="Auto-wait after action",
+            variable=self.auto_wait_var, bootstyle="secondary-round-toggle"
+        ).grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
 
     def _build_action_list(self, parent: ttk.Frame):
         scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL)
@@ -270,7 +333,12 @@ class MacroApp:
         action_type = self.action_type_var.get()
         frame_map = {
             "Left Click": self.click_frame,
+            "Right Click": self.rclick_frame,
+            "Click & Hold": self.hold_frame,
             "Mouseover": self.hover_frame,
+            "Key Press": self.key_frame,
+            "Key Combo": self.combo_frame,
+            "Scroll": self.scroll_frame,
             "Wait": self.wait_frame,
             "Screenshot": self.screenshot_frame,
         }
@@ -304,6 +372,41 @@ class MacroApp:
                 if s <= 0:
                     raise ValueError("Seconds must be greater than 0.")
                 action = {"type": "wait", "seconds": s}
+                self._last_wait_seconds = self.wait_seconds.get()
+
+            elif action_type == "Right Click":
+                x = self._validate_int(self.rclick_x.get(), "X")
+                y = self._validate_int(self.rclick_y.get(), "Y")
+                action = {"type": "right_click", "x": x, "y": y}
+
+            elif action_type == "Click & Hold":
+                x = self._validate_int(self.hold_x.get(), "X")
+                y = self._validate_int(self.hold_y.get(), "Y")
+                s = self._validate_float(self.hold_seconds.get(), "Seconds")
+                if s <= 0:
+                    raise ValueError("Seconds must be greater than 0.")
+                action = {"type": "click_hold", "x": x, "y": y, "seconds": s}
+
+            elif action_type == "Key Press":
+                key = self.key_name.get().strip()
+                if not key:
+                    raise ValueError("Key name cannot be empty.")
+                action = {"type": "key_press", "key": key}
+
+            elif action_type == "Key Combo":
+                raw = self.combo_keys.get().strip()
+                keys = [k.strip() for k in raw.split(",") if k.strip()]
+                if len(keys) < 2:
+                    raise ValueError("Enter at least 2 comma-separated keys (e.g. ctrl,c).")
+                action = {"type": "key_combo", "keys": keys}
+
+            elif action_type == "Scroll":
+                x = self._validate_int(self.scroll_x.get(), "X")
+                y = self._validate_int(self.scroll_y.get(), "Y")
+                amount = self._validate_int(self.scroll_amount.get(), "Amount")
+                if amount == 0:
+                    raise ValueError("Amount cannot be 0.")
+                action = {"type": "scroll", "x": x, "y": y, "amount": amount}
 
             elif action_type == "Screenshot":
                 x1 = self._validate_int(self.ss_x1.get(), "X1")
@@ -333,6 +436,9 @@ class MacroApp:
             self._set_status(f"Updated action {idx + 1}: {self._action_label(action)}")
         else:
             self.actions.append(action)
+            if self.auto_wait_var.get() and action["type"] != "wait":
+                wait_val = float(self._last_wait_seconds)
+                self.actions.append({"type": "wait", "seconds": wait_val})
             self._refresh_listbox()
             self._set_status(f"Added: {self._action_label(action)}")
 
@@ -413,15 +519,18 @@ class MacroApp:
         threading.Thread(target=self._countdown_and_capture, daemon=True).start()
 
     def _countdown_and_capture(self):
-        for i in [3, 2, 1]:
+        for i in [2, 1]:
             self.root.after(0, lambda i=i: self._set_status(f"Hover mouse over target... capturing in {i}s"))
             time.sleep(1)
         pos = pyautogui.position()
         action_type = self.action_type_var.get()
-        if action_type == "Mouseover":
-            x_var, y_var = self.hover_x, self.hover_y
-        else:
-            x_var, y_var = self.click_x, self.click_y
+        coord_map = {
+            "Mouseover":     (self.hover_x,   self.hover_y),
+            "Right Click":   (self.rclick_x,  self.rclick_y),
+            "Click & Hold":  (self.hold_x,    self.hold_y),
+            "Scroll":        (self.scroll_x,  self.scroll_y),
+        }
+        x_var, y_var = coord_map.get(action_type, (self.click_x, self.click_y))
         self.root.after(0, lambda: x_var.set(str(pos.x)))
         self.root.after(0, lambda: y_var.set(str(pos.y)))
         self.root.after(0, lambda: self._set_status(f"Captured position: ({pos.x}, {pos.y})"))
@@ -560,7 +669,14 @@ class MacroApp:
         game_mode = self.game_mode_var.get() and pydirectinput is not None
         if t == "click":
             if game_mode:
-                pydirectinput.click(action["x"], action["y"])
+                pydirectinput.moveTo(action["x"], action["y"])
+                time.sleep(0.05)
+                if win32api:
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                    time.sleep(0.02)
+                    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                else:
+                    pydirectinput.click(action["x"], action["y"])
             else:
                 pyautogui.click(action["x"], action["y"])
         elif t == "mouseover":
@@ -583,6 +699,61 @@ class MacroApp:
             path = f"./screenshots/{self.screenshot_counter}.png"
             img = pyautogui.screenshot(region=(x1, y1, w, h))
             img.save(path)
+        elif t == "right_click":
+            if game_mode:
+                pydirectinput.moveTo(action["x"], action["y"])
+                time.sleep(0.05)
+                if win32api:
+                    win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+                    time.sleep(0.02)
+                    win32api.mouse_event(win32con.MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+                else:
+                    pydirectinput.rightClick(action["x"], action["y"])
+            else:
+                pyautogui.rightClick(action["x"], action["y"])
+        elif t == "click_hold":
+            if game_mode and win32api:
+                pydirectinput.moveTo(action["x"], action["y"])
+                time.sleep(0.05)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+                end = time.time() + action["seconds"]
+                while time.time() < end:
+                    if self.stop_flag.is_set():
+                        win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+                        return
+                    time.sleep(0.05)
+                win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            else:
+                pyautogui.mouseDown(action["x"], action["y"])
+                end = time.time() + action["seconds"]
+                while time.time() < end:
+                    if self.stop_flag.is_set():
+                        pyautogui.mouseUp()
+                        return
+                    time.sleep(0.05)
+                pyautogui.mouseUp()
+        elif t == "key_press":
+            if game_mode:
+                pydirectinput.press(action["key"])
+            else:
+                pyautogui.press(action["key"])
+        elif t == "key_combo":
+            keys = action["keys"]
+            if game_mode:
+                for k in keys:
+                    pydirectinput.keyDown(k)
+                for k in reversed(keys):
+                    pydirectinput.keyUp(k)
+            else:
+                pyautogui.hotkey(*keys)
+        elif t == "scroll":
+            x, y, amount = action["x"], action["y"], action["amount"]
+            if game_mode and win32api:
+                win32api.SetCursorPos((x, y))
+                time.sleep(0.05)
+                win32api.mouse_event(win32con.MOUSEEVENTF_WHEEL, 0, 0, amount * 120, 0)
+            else:
+                pyautogui.scroll(amount, x=x, y=y)
 
     # =========================================================================
     # OCR + CSV
@@ -672,15 +843,34 @@ class MacroApp:
             return
         action = self.actions[idx]
         t = action["type"]
-        type_map = {"click": "Left Click", "mouseover": "Mouseover", "wait": "Wait", "screenshot": "Screenshot"}
+        type_map = {
+            "click": "Left Click", "right_click": "Right Click", "click_hold": "Click & Hold",
+            "mouseover": "Mouseover", "key_press": "Key Press", "key_combo": "Key Combo",
+            "scroll": "Scroll", "wait": "Wait", "screenshot": "Screenshot",
+        }
         self.action_type_var.set(type_map.get(t, "Left Click"))
         self._on_type_change()
         if t == "click":
             self.click_x.set(str(action["x"]))
             self.click_y.set(str(action["y"]))
+        elif t == "right_click":
+            self.rclick_x.set(str(action["x"]))
+            self.rclick_y.set(str(action["y"]))
+        elif t == "click_hold":
+            self.hold_x.set(str(action["x"]))
+            self.hold_y.set(str(action["y"]))
+            self.hold_seconds.set(str(action["seconds"]))
         elif t == "mouseover":
             self.hover_x.set(str(action["x"]))
             self.hover_y.set(str(action["y"]))
+        elif t == "key_press":
+            self.key_name.set(action["key"])
+        elif t == "key_combo":
+            self.combo_keys.set(",".join(action["keys"]))
+        elif t == "scroll":
+            self.scroll_x.set(str(action["x"]))
+            self.scroll_y.set(str(action["y"]))
+            self.scroll_amount.set(str(action["amount"]))
         elif t == "wait":
             self.wait_seconds.set(str(action["seconds"]))
         elif t == "screenshot":
@@ -738,8 +928,19 @@ class MacroApp:
         t = action["type"]
         if t == "click":
             return f"Left Click at ({action['x']}, {action['y']})"
+        elif t == "right_click":
+            return f"Right Click at ({action['x']}, {action['y']})"
+        elif t == "click_hold":
+            return f"Click & Hold at ({action['x']}, {action['y']}) for {action['seconds']}s"
         elif t == "mouseover":
             return f"Mouseover at ({action['x']}, {action['y']})"
+        elif t == "key_press":
+            return f"Key Press: {action['key']}"
+        elif t == "key_combo":
+            return f"Key Combo: {'+'.join(action['keys'])}"
+        elif t == "scroll":
+            direction = "up" if action["amount"] > 0 else "down"
+            return f"Scroll {direction} {abs(action['amount'])} at ({action['x']}, {action['y']})"
         elif t == "wait":
             return f"Wait {action['seconds']}s"
         elif t == "screenshot":
